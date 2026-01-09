@@ -119,7 +119,7 @@ npm run test:silent
 ## Project Structure
 
 ```
-tallie1/
+tallie/
 ├── config/          # Database configuration
 ├── controllers/     # Route controllers
 ├── data/            # Data storage utilities
@@ -130,6 +130,7 @@ tallie1/
 ├── tests/           # Test files
 ├── types/           # TypeScript type definitions
 ├── utils/           # Utility functions
+├── app.ts           # Route assembler
 ├── index.ts         # Main application entry point
 ├── package.json     # Dependencies and scripts
 └── tsconfig.json    # TypeScript configuration
