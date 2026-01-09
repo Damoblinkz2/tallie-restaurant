@@ -21,7 +21,7 @@ A comprehensive REST API for managing restaurant reservations, tables, and waitl
 
    ```bash
    git clone <repository-url>
-   cd tallie1
+   cd tallie
    ```
 
 2. Install dependencies:
