@@ -1,36 +1,37 @@
 import mongoose, { Schema } from "mongoose";
 import { IRestaurant } from "../types/index.js";
 
+/**
+ * Mongoose schema for the Restaurant collection.
+ * Stores core restaurant details including operating hours, table capacity,
+ * and the menu items available for customer pre-ordering.
+ * Timestamps are automatically managed (createdAt / updatedAt).
+ */
 const restaurantSchema = new Schema<IRestaurant>(
   {
+    /** Display name of the restaurant brand */
     name: {
       type: String,
       required: [true, "Restaurant name is required"],
       trim: true,
       minlength: [2, "Name must be at least 2 characters"],
     },
-    openingTime: {
-      type: String,
-      required: [true, "Opening time is required"],
-      match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Invalid time format. Use HH:MM"],
-    },
-    closingTime: {
-      type: String,
-      required: [true, "Closing time is required"],
-      match: [/^([01]\d|2[0-3]):([0-5]\d)$/, "Invalid time format. Use HH:MM"],
-    },
-    totalTables: {
-      type: Number,
-      required: [true, "Total tables is required"],
-      min: [1, "Must have at least 1 table"],
+    /** User ID of the owning restaurant account */
+    ownerId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: [true, "Owner ID is required"],
     },
   },
   {
     timestamps: true,
-  }
+  },
 );
 
+restaurantSchema.index({ ownerId: 1 });
+
+/** Mongoose model for the Restaurant collection */
 export const Restaurant = mongoose.model<IRestaurant>(
   "Restaurant",
-  restaurantSchema
+  restaurantSchema,
 );

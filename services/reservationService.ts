@@ -1,7 +1,18 @@
+/**
+ * Reservation service — core business logic for booking management.
+ *
+ * Handles the full reservation lifecycle: creating, modifying, cancelling,
+ * confirming, and completing bookings.  Also owns the table-availability
+ * algorithm and exposes helpers for checking open slots.
+ *
+ * Pre-order kitchen notifications are managed by a module-level timer registry
+ * (`preparationTimers`) so timers can be cancelled if a reservation is modified
+ * or cancelled before the 30-minute trigger fires.
+ */
 import { Reservation } from "../models/reservation.js";
-import { IReservation } from "../types/index.js";
+import { IPreOrderItem, IReservation } from "../types/index.js";
 import { Table } from "../models/table.js";
-import { Restaurant } from "../models/restaurant.js";
+import { Branch } from "../models/branch.js";
 import { TimeSlot } from "../types/index.js";
 import {
   isTimeInRange,
@@ -11,6 +22,82 @@ import {
 } from "../utils/timeUtils.js";
 import { notificationService } from "./notificationService.js";
 import mongoose from "mongoose";
+
+/**
+ * Maximum safe delay for `setTimeout` in Node.js (2^31 − 1 ms ≈ 24.8 days).
+ * Reservations scheduled further in the future than this limit are skipped;
+ * a recurring job or server restart would re-schedule them closer to the time.
+ */
+const MAX_TIMEOUT_MS = 2147483647;
+
+/**
+ * In-memory registry that maps a reservation ID string to its active preparation timer.
+ * Storing the timer handles here allows us to cancel a scheduled notification if the
+ * reservation is modified or cancelled before the 30-minute window fires.
+ */
+const preparationTimers = new Map<string, NodeJS.Timeout>();
+
+/**
+ * Cancels and removes the preparation notification timer for the given reservation, if one exists.
+ * Called whenever a reservation is cancelled or completed so the kitchen is not alerted
+ * for a booking that will never arrive.
+ *
+ * @param reservationId - The string representation of the reservation's MongoDB ObjectId
+ */
+const clearPreparationTimer = (reservationId: string): void => {
+  const existingTimer = preparationTimers.get(reservationId);
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+    preparationTimers.delete(reservationId);
+  }
+};
+
+/**
+ * Schedules a kitchen preparation notification for a reservation that has pre-ordered items.
+ * The notification fires 30 minutes before the customer's arrival (`reservation.startTime`).
+ *
+ * Scheduling rules:
+ * - If the reservation has no pre-order items, no timer is set.
+ * - If the trigger time has already passed (late booking), the notification fires immediately.
+ * - If the delay would exceed `MAX_TIMEOUT_MS` (>24.8 days), the timer is skipped to avoid
+ *   integer overflow in `setTimeout`.
+ * - Any previously scheduled timer for the same reservation is cancelled first to prevent
+ *   duplicate alerts when a reservation is modified.
+ *
+ * @param reservation - The reservation document that may carry pre-ordered items
+ */
+const schedulePreparationNotification = (reservation: IReservation): void => {
+  // Cancel any existing timer for this reservation before setting a new one
+  clearPreparationTimer(reservation._id.toString());
+
+  if (!reservation.preOrderItems || reservation.preOrderItems.length === 0) {
+    return;
+  }
+
+  const arrivalDateTime = new Date(
+    `${reservation.date}T${reservation.startTime}:00`,
+  );
+  const triggerAt = new Date(arrivalDateTime.getTime() - 30 * 60 * 1000);
+  const delayMs = triggerAt.getTime() - Date.now();
+
+  if (delayMs <= 0) {
+    // Arrival is imminent or in the past — notify the kitchen right away
+    notificationService.sendStartCookingNotification(reservation);
+    return;
+  }
+
+  if (delayMs > MAX_TIMEOUT_MS) {
+    // Too far in the future for a single setTimeout call — skip to prevent overflow
+    return;
+  }
+
+  const timer = setTimeout(() => {
+    notificationService.sendStartCookingNotification(reservation);
+    preparationTimers.delete(reservation._id.toString());
+  }, delayMs);
+
+  preparationTimers.set(reservation._id.toString(), timer);
+};
 
 export const reservationService = {
   /**
@@ -30,22 +117,24 @@ export const reservationService = {
    * @throws {Error} If restaurant ID is invalid, restaurant not found, date is in the past, time is outside operating hours, or no tables are available
    */
   async createReservation(
-    restaurantId: string,
+    branchId: string,
     customerName: string,
     phone: string,
     partySize: number,
     date: string,
     startTime: string,
     duration: number,
-    email?: string
+    email?: string,
+    preOrderItems?: IPreOrderItem[],
+    customerId?: string,
   ): Promise<IReservation> {
-    if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
-      throw new Error("Invalid restaurant ID");
+    if (!mongoose.Types.ObjectId.isValid(branchId)) {
+      throw new Error("Invalid branch ID");
     }
 
-    const restaurant = await Restaurant.findById(restaurantId);
-    if (!restaurant) {
-      throw new Error("Restaurant not found");
+    const branch = await Branch.findById(branchId);
+    if (!branch) {
+      throw new Error("Branch not found");
     }
 
     const reservationDate = new Date(date);
@@ -56,37 +145,37 @@ export const reservationService = {
       throw new Error("Cannot make reservations for past dates");
     }
 
-    if (
-      !isTimeInRange(startTime, restaurant.openingTime, restaurant.closingTime)
-    ) {
+    if (!isTimeInRange(startTime, branch.openingTime, branch.closingTime)) {
       throw new Error(
-        `Reservation must be within operating hours (${restaurant.openingTime} - ${restaurant.closingTime})`
+        `Reservation must be within operating hours (${branch.openingTime} - ${branch.closingTime})`,
       );
     }
 
     const endTimeMinutes = timeToMinutes(startTime) + duration;
-    const closingTimeMinutes = timeToMinutes(restaurant.closingTime);
+    const closingTimeMinutes = timeToMinutes(branch.closingTime);
     if (endTimeMinutes > closingTimeMinutes) {
       throw new Error("Reservation extends beyond closing time");
     }
 
     const availableTable = await this.findAvailableTable(
-      restaurantId,
+      branchId,
       partySize,
       date,
       startTime,
-      duration
+      duration,
     );
 
     if (!availableTable) {
       throw new Error(
-        "No available tables for the requested party size and time"
+        "No available tables for the requested party size and time",
       );
     }
 
     const reservation = new Reservation({
-      restaurantId,
+      restaurantId: branch.restaurantId,
+      branchId,
       tableId: availableTable._id,
+      customerId,
       customerName,
       phone,
       email,
@@ -94,6 +183,7 @@ export const reservationService = {
       date,
       startTime,
       duration,
+      preOrderItems,
       status: "pending",
     });
 
@@ -101,6 +191,7 @@ export const reservationService = {
 
     // Send confirmation notification
     notificationService.sendReservationConfirmation(savedReservation);
+    schedulePreparationNotification(savedReservation);
 
     return savedReservation;
   },
@@ -126,7 +217,8 @@ export const reservationService = {
       startTime?: string;
       partySize?: number;
       duration?: number;
-    }
+      preOrderItems?: IPreOrderItem[];
+    },
   ): Promise<IReservation> {
     if (!mongoose.Types.ObjectId.isValid(reservationId)) {
       throw new Error("Invalid reservation ID");
@@ -145,9 +237,9 @@ export const reservationService = {
       throw new Error("Cannot modify a completed reservation");
     }
 
-    const restaurant = await Restaurant.findById(reservation.restaurantId);
-    if (!restaurant) {
-      throw new Error("Restaurant not found");
+    const branch = await Branch.findById(reservation.branchId);
+    if (!branch) {
+      throw new Error("Branch not found");
     }
 
     // Use existing values if not updating
@@ -155,6 +247,7 @@ export const reservationService = {
     const newStartTime = updates.startTime || reservation.startTime;
     const newPartySize = updates.partySize || reservation.partySize;
     const newDuration = updates.duration || reservation.duration;
+    const newPreOrderItems = updates.preOrderItems ?? reservation.preOrderItems;
 
     // Validate new date is not in the past
     const reservationDate = new Date(newDate);
@@ -166,15 +259,9 @@ export const reservationService = {
     }
 
     // Validate new time is within operating hours
-    if (
-      !isTimeInRange(
-        newStartTime,
-        restaurant.openingTime,
-        restaurant.closingTime
-      )
-    ) {
+    if (!isTimeInRange(newStartTime, branch.openingTime, branch.closingTime)) {
       throw new Error(
-        `Reservation must be within operating hours (${restaurant.openingTime} - ${restaurant.closingTime})`
+        `Reservation must be within operating hours (${branch.openingTime} - ${branch.closingTime})`,
       );
     }
 
@@ -196,18 +283,18 @@ export const reservationService = {
           newDate,
           newStartTime,
           newDuration,
-          reservationId
+          reservationId,
         );
 
         if (hasConflict) {
           // Try to find another available table
           const newTable = await this.findAvailableTable(
-            reservation.restaurantId.toString(),
+            reservation.branchId.toString(),
             newPartySize,
             newDate,
             newStartTime,
             newDuration,
-            reservationId
+            reservationId,
           );
 
           if (!newTable) {
@@ -219,12 +306,12 @@ export const reservationService = {
       } else {
         // Current table can't accommodate new party size
         const newTable = await this.findAvailableTable(
-          reservation.restaurantId.toString(),
+          reservation.branchId.toString(),
           newPartySize,
           newDate,
           newStartTime,
           newDuration,
-          reservationId
+          reservationId,
         );
 
         if (!newTable) {
@@ -240,11 +327,13 @@ export const reservationService = {
     reservation.startTime = newStartTime;
     reservation.partySize = newPartySize;
     reservation.duration = newDuration;
+    reservation.preOrderItems = newPreOrderItems;
 
     const updatedReservation = await reservation.save();
 
     // Send modification notification
     notificationService.sendModificationNotification(updatedReservation);
+    schedulePreparationNotification(updatedReservation);
 
     return updatedReservation;
   },
@@ -277,16 +366,17 @@ export const reservationService = {
 
     reservation.status = "cancelled";
     const cancelledReservation = await reservation.save();
+    clearPreparationTimer(cancelledReservation._id.toString());
 
     // Send cancellation notification
     notificationService.sendCancellationNotification(cancelledReservation);
 
     // Check waitlist and notify next person
     await this.processWaitlist(
-      reservation.restaurantId.toString(),
+      reservation.branchId.toString(),
       reservation.date,
       reservation.startTime,
-      reservation.duration
+      reservation.duration,
     );
 
     return cancelledReservation;
@@ -343,7 +433,9 @@ export const reservationService = {
     }
 
     reservation.status = "completed";
-    return await reservation.save();
+    const completedReservation = await reservation.save();
+    clearPreparationTimer(completedReservation._id.toString());
+    return completedReservation;
   },
 
   /**
@@ -362,7 +454,7 @@ export const reservationService = {
     date: string,
     startTime: string,
     duration: number,
-    excludeReservationId?: string
+    excludeReservationId?: string,
   ): Promise<boolean> {
     const query: any = {
       tableId,
@@ -381,7 +473,7 @@ export const reservationService = {
         startTime,
         duration,
         reservation.startTime,
-        reservation.duration
+        reservation.duration,
       );
     });
   },
@@ -390,7 +482,7 @@ export const reservationService = {
    * Finds an available table for the given party size and time slot.
    * Optionally excludes a specific reservation from the availability check.
    *
-   * @param {string} restaurantId - The ID of the restaurant
+   * @param {string} branchId - The ID of the branch
    * @param {number} partySize - The number of guests
    * @param {string} date - The date (YYYY-MM-DD format)
    * @param {string} startTime - The start time (HH:MM format)
@@ -399,15 +491,15 @@ export const reservationService = {
    * @returns {Promise<any>} The available table object or null if none found
    */
   async findAvailableTable(
-    restaurantId: string,
+    branchId: string,
     partySize: number,
     date: string,
     startTime: string,
     duration: number,
-    excludeReservationId?: string
+    excludeReservationId?: string,
   ) {
     const tables = await Table.find({
-      restaurantId,
+      branchId,
       capacity: { $gte: partySize },
     }).sort({ capacity: 1 });
 
@@ -416,7 +508,7 @@ export const reservationService = {
     }
 
     const query: any = {
-      restaurantId,
+      branchId,
       date,
       status: { $in: ["pending", "confirmed"] },
     };
@@ -436,7 +528,7 @@ export const reservationService = {
           startTime,
           duration,
           reservation.startTime,
-          reservation.duration
+          reservation.duration,
         );
       });
 
@@ -452,32 +544,27 @@ export const reservationService = {
    * Processes the waitlist for a restaurant when a table becomes available.
    * Notifies the next waiting customer if a table is available for their preferred time.
    *
-   * @param {string} restaurantId - The ID of the restaurant
+   * @param {string} branchId - The ID of the branch
    * @param {string} date - The date (YYYY-MM-DD format)
    * @param {string} startTime - The start time (HH:MM format)
    * @param {number} duration - The duration in minutes
    * @returns {Promise<void>}
    */
   async processWaitlist(
-    restaurantId: string,
+    branchId: string,
     date: string,
     startTime: string,
-    duration: number
+    duration: number,
   ): Promise<void> {
     // Import here to avoid circular dependency
     const { waitlistService } = await import("./waitlistService.js");
-    await waitlistService.notifyWaitlist(
-      restaurantId,
-      date,
-      startTime,
-      duration
-    );
+    await waitlistService.notifyWaitlist(branchId, date, startTime, duration);
   },
 
   /**
    * Checks if a table is available for the given party size and time slot.
    *
-   * @param {string} restaurantId - The ID of the restaurant
+   * @param {string} branchId - The ID of the branch
    * @param {number} partySize - The number of guests
    * @param {string} date - The date (YYYY-MM-DD format)
    * @param {string} startTime - The start time (HH:MM format)
@@ -485,41 +572,41 @@ export const reservationService = {
    * @returns {Promise<boolean>} True if available, false otherwise
    */
   async checkAvailability(
-    restaurantId: string,
+    branchId: string,
     partySize: number,
     date: string,
     startTime: string,
-    duration: number
+    duration: number,
   ): Promise<boolean> {
     const table = await this.findAvailableTable(
-      restaurantId,
+      branchId,
       partySize,
       date,
       startTime,
-      duration
+      duration,
     );
     return table !== null;
   },
 
   /**
-   * Retrieves all non-cancelled reservations for a restaurant on a specific date.
+   * Retrieves all non-cancelled reservations for a branch on a specific date.
    * Includes populated table information and sorted by start time.
    *
-   * @param {string} restaurantId - The ID of the restaurant
+   * @param {string} branchId - The ID of the branch
    * @param {string} date - The date (YYYY-MM-DD format)
    * @returns {Promise<IReservation[]>} Array of reservation objects
    * @throws {Error} If restaurant ID is invalid
    */
   async getReservationsByDate(
-    restaurantId: string,
-    date: string
+    branchId: string,
+    date: string,
   ): Promise<IReservation[]> {
-    if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
-      throw new Error("Invalid restaurant ID");
+    if (!mongoose.Types.ObjectId.isValid(branchId)) {
+      throw new Error("Invalid branch ID");
     }
 
     return await Reservation.find({
-      restaurantId,
+      branchId,
       date,
       status: { $ne: "cancelled" },
     })
@@ -528,10 +615,10 @@ export const reservationService = {
   },
 
   /**
-   * Gets all available time slots for a restaurant on a specific date for the given party size.
+   * Gets all available time slots for a branch on a specific date for the given party size.
    * Generates time slots based on restaurant operating hours and checks availability.
    *
-   * @param {string} restaurantId - The ID of the restaurant
+   * @param {string} branchId - The ID of the branch
    * @param {number} partySize - The number of guests
    * @param {string} date - The date (YYYY-MM-DD format)
    * @param {number} [slotDuration=120] - Duration of each time slot in minutes (default: 120)
@@ -539,22 +626,22 @@ export const reservationService = {
    * @throws {Error} If restaurant ID is invalid or restaurant not found
    */
   async getAvailableTimeSlots(
-    restaurantId: string,
+    branchId: string,
     partySize: number,
     date: string,
-    slotDuration: number = 120
+    slotDuration: number = 120,
   ): Promise<TimeSlot[]> {
-    if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
-      throw new Error("Invalid restaurant ID");
+    if (!mongoose.Types.ObjectId.isValid(branchId)) {
+      throw new Error("Invalid branch ID");
     }
 
-    const restaurant = await Restaurant.findById(restaurantId);
-    if (!restaurant) {
-      throw new Error("Restaurant not found");
+    const branch = await Branch.findById(branchId);
+    if (!branch) {
+      throw new Error("Branch not found");
     }
 
     const tables = await Table.find({
-      restaurantId,
+      branchId,
       capacity: { $gte: partySize },
     });
 
@@ -563,15 +650,15 @@ export const reservationService = {
     }
 
     const existingReservations = await Reservation.find({
-      restaurantId,
+      branchId,
       date,
       status: { $in: ["pending", "confirmed"] },
     });
 
     const timeSlots: TimeSlot[] = [];
 
-    const openingMinutes = timeToMinutes(restaurant.openingTime);
-    const closingMinutes = timeToMinutes(restaurant.closingTime);
+    const openingMinutes = timeToMinutes(branch.openingTime);
+    const closingMinutes = timeToMinutes(branch.closingTime);
 
     for (
       let time = openingMinutes;
@@ -590,7 +677,7 @@ export const reservationService = {
             startTime,
             slotDuration,
             reservation.startTime,
-            reservation.duration
+            reservation.duration,
           );
         });
         return !hasConflict;

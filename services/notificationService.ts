@@ -1,3 +1,11 @@
+/**
+ * Notification service — simulated customer and kitchen communication.
+ *
+ * In production, each method here would integrate with real email providers
+ * (e.g. SendGrid, AWS SES) and SMS gateways (e.g. Twilio).  For now every
+ * notification is written to stdout so the system behaviour is observable
+ * without external dependencies.
+ */
 import { IReservation, IWaitlist } from "../types/index.js";
 
 const notificationService = {
@@ -28,7 +36,7 @@ const notificationService = {
     console.log("📱 ===== SMS NOTIFICATION =====");
     console.log(`To: ${reservation.phone}`);
     console.log(
-      `Message: Hi ${reservation.customerName}! Your reservation for ${reservation.partySize} on ${reservation.date} at ${reservation.startTime} is confirmed. Ref: ${reservation._id}`
+      `Message: Hi ${reservation.customerName}! Your reservation for ${reservation.partySize} on ${reservation.date} at ${reservation.startTime} is confirmed. Ref: ${reservation._id}`,
     );
     console.log("===============================\n");
   },
@@ -58,7 +66,7 @@ const notificationService = {
     console.log("📱 ===== SMS NOTIFICATION =====");
     console.log(`To: ${reservation.phone}`);
     console.log(
-      `Message: Your reservation for ${reservation.date} at ${reservation.startTime} has been cancelled. Ref: ${reservation._id}`
+      `Message: Your reservation for ${reservation.date} at ${reservation.startTime} has been cancelled. Ref: ${reservation._id}`,
     );
     console.log("===============================\n");
   },
@@ -89,9 +97,34 @@ const notificationService = {
     console.log("📱 ===== SMS NOTIFICATION =====");
     console.log(`To: ${reservation.phone}`);
     console.log(
-      `Message: Your reservation has been updated. New time: ${reservation.date} at ${reservation.startTime}. Party size: ${reservation.partySize}. Ref: ${reservation._id}`
+      `Message: Your reservation has been updated. New time: ${reservation.date} at ${reservation.startTime}. Party size: ${reservation.partySize}. Ref: ${reservation._id}`,
     );
     console.log("===============================\n");
+  },
+
+  /**
+   * Sends a kitchen preparation alert to restaurant staff when a reservation with pre-ordered
+   * items is 30 minutes from the customer's arrival time.
+   * Lists all pre-ordered items so the kitchen knows exactly what to prepare.
+   * Currently logs the alert to console (in a real implementation this would page kitchen staff).
+   *
+   * @param {IReservation} reservation - The reservation whose pre-order must be prepared
+   * @returns {void}
+   */
+  sendStartCookingNotification(reservation: IReservation): void {
+    const preOrderText = (reservation.preOrderItems || [])
+      .map((item) => `${item.quantity}x ${item.name}`)
+      .join(", ");
+
+    console.log("\n👨‍🍳 ===== KITCHEN ALERT =====");
+    console.log(`Restaurant ID: ${reservation.restaurantId}`);
+    console.log(`Reservation ID: ${reservation._id}`);
+    console.log(`Customer: ${reservation.customerName}`);
+    console.log(`Arrival: ${reservation.date} ${reservation.startTime}`);
+    console.log(`Party Size: ${reservation.partySize}`);
+    console.log(`Start cooking now (30 minutes before arrival).`);
+    console.log(`Pre-order: ${preOrderText || "No pre-ordered items"}`);
+    console.log("============================\n");
   },
 
   /**
@@ -108,7 +141,7 @@ const notificationService = {
     console.log(`Subject: Table Available - Waitlist Update`);
     console.log(`\nDear ${waitlist.customerName},`);
     console.log(
-      `\nGood news! A table is now available for your requested time.`
+      `\nGood news! A table is now available for your requested time.`,
     );
     console.log(`\nDetails:`);
     console.log(`- Date: ${waitlist.date}`);
@@ -116,7 +149,7 @@ const notificationService = {
     console.log(`- Party Size: ${waitlist.partySize} guests`);
     console.log(`- Duration: ${waitlist.duration} minutes`);
     console.log(
-      `\nPlease confirm your reservation within 30 minutes to secure your spot.`
+      `\nPlease confirm your reservation within 30 minutes to secure your spot.`,
     );
     console.log(`Waitlist ID: ${waitlist._id}`);
     console.log("================================\n");
@@ -124,7 +157,7 @@ const notificationService = {
     console.log("📱 ===== SMS NOTIFICATION =====");
     console.log(`To: ${waitlist.phone}`);
     console.log(
-      `Message: Great news ${waitlist.customerName}! A table for ${waitlist.partySize} is available on ${waitlist.date} at ${waitlist.preferredTime}. Confirm within 30 min. Ref: ${waitlist._id}`
+      `Message: Great news ${waitlist.customerName}! A table for ${waitlist.partySize} is available on ${waitlist.date} at ${waitlist.preferredTime}. Confirm within 30 min. Ref: ${waitlist._id}`,
     );
     console.log("===============================\n");
   },
@@ -154,7 +187,7 @@ const notificationService = {
     console.log("📱 ===== SMS NOTIFICATION =====");
     console.log(`To: ${waitlist.phone}`);
     console.log(
-      `Message: You're on the waitlist for ${waitlist.date} at ${waitlist.preferredTime} for ${waitlist.partySize} guests. We'll notify you when a table opens up. Ref: ${waitlist._id}`
+      `Message: You're on the waitlist for ${waitlist.date} at ${waitlist.preferredTime} for ${waitlist.partySize} guests. We'll notify you when a table opens up. Ref: ${waitlist._id}`,
     );
     console.log("===============================\n");
   },

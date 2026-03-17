@@ -1,149 +1,165 @@
 # Tallie - Restaurant Reservation API
 
-A comprehensive REST API for managing restaurant reservations, tables, and waitlists built with Node.js, TypeScript, Express, and MongoDB.
+Tallie is a Node.js + TypeScript REST API for restaurant operations with:
 
-## Features
+- Role-based authentication (`restaurant_owner`, `customer`)
+- Multi-branch restaurant support
+- Branch-level menu management
+- Reservations, availability checks, and waitlist flows
 
-- **Restaurant Management**: Create and retrieve restaurant details
-- **Table Management**: Add tables to restaurants and retrieve tables by restaurant
-- **Reservation System**: Create, modify, cancel, confirm, and complete reservations
-- **Reservation Modification**: Update existing reservations
-- **Reservation Cancellation**: Cancel reservations with proper handling
-- **Reservation Status Tracking**: Track reservation statuses (confirmed, completed)
-- **Waitlist Management**: Add customers to waitlist, convert to reservations, remove from waitlist
-- **Notification System (Mock)**: Placeholder for notification services
-- **Availability Checking**: Check table availability for specific dates and times
-- **Time Slot Management**: Retrieve available time slots for reservations
+## Tech Stack
 
-## Installation
+- Node.js, TypeScript, Express
+- MongoDB + Mongoose
+- Joi validation
+- JWT authentication (`jsonwebtoken`) + password hashing (`bcryptjs`)
+- Jest + Supertest
 
-1. Clone the repository:
+## Core Features
 
-   ```bash
-   git clone <repository-url>
-   cd tallie
-   ```
+- **Authentication**
+  - Register/login users
+  - Role-based route protection
+- **Restaurant Ownership**
+  - Restaurant is owned by a `restaurant_owner` user
+- **Multi-Branch Support**
+  - One restaurant can have many branches
+  - Branches carry opening/closing hours and table capacity
+- **Standalone Menu Module**
+  - Managed per branch via dedicated endpoints
+- **Table Management**
+  - Tables are branch-scoped
+- **Reservations**
+  - Branch-based booking, modify/cancel/confirm/complete
+  - Optional pre-order items
+  - Mock kitchen “start cooking” notification 30 minutes before arrival
+- **Waitlist**
+  - Join waitlist, convert to reservation, remove entries
 
-2. Install dependencies:
+## Setup
 
-   ```bash
-   npm install
-   ```
-
-3. Set up environment variables:
-   Create a `.env` file in the root directory with the following variables:
-
-   ```
-   PORT=3000
-   MONGODB_URI=mongodb://localhost:27017/tallie
-   ```
-
-4. Start the development server:
-   ```bash
-   npm run dev
-   ```
-
-## Usage
-
-The API will be running at `http://localhost:3000`.
-
-### Health Check
-
-Visit `http://localhost:3000` to check if the API is running and see available features.
-
-## API Endpoints
-
-### Restaurants
-
-- `POST /api/restaurants` - Create a new restaurant
-- `GET /api/restaurants` - Get all restaurants
-- `GET /api/restaurants/:id` - Get restaurant details by ID
-
-### Tables
-
-- `POST /api/tables` - Add a table to a restaurant
-- `GET /api/tables/:restaurantId` - Get tables by restaurant ID
-
-### Reservations
-
-- `POST /api/reservations` - Create a new reservation
-- `PUT /api/reservations/:id` - Modify an existing reservation
-- `DELETE /api/reservations/:id` - Cancel a reservation
-- `PATCH /api/reservations/:id/confirm` - Confirm a reservation
-- `PATCH /api/reservations/:id/complete` - Mark a reservation as completed
-- `GET /api/reservations/check-availability` - Check availability for a date/time
-- `GET /api/reservations/by-date` - Get reservations by date
-- `GET /api/reservations/available-slots` - Get available time slots
-
-### Waitlist
-
-- `POST /api/waitlist` - Add a customer to the waitlist
-- `GET /api/waitlist` - Get waitlist by date
-- `POST /api/waitlist/:id/convert` - Convert waitlist entry to reservation
-- `DELETE /api/waitlist/:id` - Remove from waitlist
-
-## Testing
-
-Run the test suite using Jest:
+1. Clone and install:
 
 ```bash
-# Run all tests
+git clone <repository-url>
+cd tallie
+npm install
+```
+
+2. Create `.env`:
+
+```env
+PORT=3000
+MONGODB_URI=mongodb://localhost:27017/tallie
+NODE_ENV=development
+
+# Auth
+JWT_SECRET=replace_with_strong_secret
+JWT_EXPIRES_IN=7d
+```
+
+3. Run locally:
+
+```bash
+npm run dev
+```
+
+API base URL: `http://localhost:3000`
+
+Health check: `GET /`
+
+## Scripts
+
+```bash
+npm run dev
+npm run clean
+npm run build
+npm start
+
 npm test
-
-# Run tests in watch mode
 npm run test:watch
-
-# Run tests with coverage
 npm run test:coverage
-
-# Run tests verbosely
 npm run test:verbose
-
-# Run tests silently
 npm run test:silent
 ```
 
-## Building and Production
+## Authentication and Roles
 
-1. Build the project:
+Use `Authorization: Bearer <token>` for protected routes.
 
-   ```bash
-   npm run build
-   ```
+- `restaurant_owner` can create restaurants, branches, tables, and menus.
+- `customer` can create reservations and waitlist entries.
 
-2. Start the production server:
-   ```bash
-   npm start
-   ```
+## API Endpoints
+
+### Auth (`/api/auth`)
+
+- `POST /register`
+- `POST /login`
+- `GET /me` (protected)
+
+### Restaurants (`/api/restaurants`)
+
+- `POST /` (protected: `restaurant_owner`)
+- `GET /`
+- `GET /:id`
+
+### Branches (`/api/branches`)
+
+- `POST /` (protected: `restaurant_owner`)
+- `GET /:id`
+- `GET /restaurant/:restaurantId`
+
+### Menu (`/api/menu`)
+
+- `PATCH /branch/:branchId` (protected: `restaurant_owner`)
+- `GET /branch/:branchId`
+
+### Tables (`/api/tables`)
+
+- `POST /` (protected: `restaurant_owner`)
+- `GET /branch/:branchId`
+
+### Reservations (`/api/reservations`)
+
+- `POST /` (protected: `customer`)
+- `PUT /:id`
+- `DELETE /:id`
+- `PATCH /:id/confirm`
+- `PATCH /:id/complete`
+- `GET /check-availability`
+- `GET /by-date`
+- `GET /available-slots`
+
+### Waitlist (`/api/waitlist`)
+
+- `POST /` (protected: `customer`)
+- `GET /`
+- `POST /:id/convert`
+- `DELETE /:id`
+
+## Request Notes
+
+- Reservation and waitlist flows are **branch-based**.
+- Menu is **branch-based**.
+- Validation is applied at route middleware and controller level using Joi.
 
 ## Project Structure
 
-```
+```text
 tallie/
-├── config/          # Database configuration
-├── controllers/     # Route controllers
-├── data/            # Data storage utilities
-├── middleware/      # Express middleware
-├── models/          # Mongoose models
-├── routes/          # API routes
-├── services/        # Business logic services
-├── tests/           # Test files
-├── types/           # TypeScript type definitions
-├── utils/           # Utility functions
-├── app.ts           # Route assembler
-├── index.ts         # Main application entry point
-├── package.json     # Dependencies and scripts
-└── tsconfig.json    # TypeScript configuration
+├── config/
+├── controllers/
+├── data/
+├── middleware/
+├── models/
+├── routes/
+├── services/
+├── tests/
+├── types/
+├── utils/
+├── app.ts
+├── index.ts
+├── package.json
+└── tsconfig.json
 ```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the ISC License.

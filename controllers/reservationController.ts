@@ -1,6 +1,16 @@
+/**
+ * Reservation controller — HTTP request handlers for reservation management.
+ *
+ * Handles the full reservation lifecycle: create, modify, cancel, confirm,
+ * complete, availability checks, and date/slot queries.
+ * Each handler validates inputs at the controller level before delegating
+ * to the reservation service and returning a structured JSON response.
+ */
 import { Request, Response } from "express";
 import { reservationService } from "../services/reservationService.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
+import { requestSchemas } from "../validation/schemas.js";
+import { validateControllerInput } from "../utils/controllerValidation.js";
 
 export const reservationController = {
   /**
@@ -13,8 +23,30 @@ export const reservationController = {
    * @returns JSON response with success status and created reservation data
    */
   createReservation: asyncHandler(async (req: Request, res: Response) => {
+    const validatedBody = validateControllerInput<{
+      branchId: string;
+      customerName: string;
+      phone: string;
+      partySize: number;
+      date: string;
+      startTime: string;
+      duration: number;
+      email?: string;
+      preOrderItems?: {
+        itemId: string;
+        name: string;
+        quantity: number;
+        price: number;
+        notes?: string;
+      }[];
+    }>(requestSchemas.createReservation, req.body, res);
+
+    if (!validatedBody) {
+      return;
+    }
+
     const {
-      restaurantId,
+      branchId,
       customerName,
       phone,
       partySize,
@@ -22,75 +54,20 @@ export const reservationController = {
       startTime,
       duration,
       email,
-    } = req.body;
+      preOrderItems,
+    } = validatedBody;
 
-    if (
-      !restaurantId ||
-      !customerName ||
-      !phone ||
-      !partySize ||
-      !date ||
-      !startTime ||
-      !duration
-    ) {
-      res.status(400).json({
-        success: false,
-        message: "Missing required fields",
-        required: [
-          "restaurantId",
-          "customerName",
-          "phone",
-          "partySize",
-          "date",
-          "startTime",
-          "duration",
-        ],
-      });
-      return;
-    }
-
-    if (partySize < 1) {
-      res.status(400).json({
-        success: false,
-        message: "Party size must be at least 1",
-      });
-      return;
-    }
-
-    if (duration < 30) {
-      res.status(400).json({
-        success: false,
-        message: "Duration must be at least 30 minutes",
-      });
-      return;
-    }
-
-    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-    if (!dateRegex.test(date)) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid date format. Use YYYY-MM-DD",
-      });
-      return;
-    }
-
-    const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
-    if (!timeRegex.test(startTime)) {
-      res.status(400).json({
-        success: false,
-        message: "Invalid time format. Use HH:MM (24-hour format)",
-      });
-      return;
-    }
-
+    //check for reservation availability,pass in the restaurantId,
+    //time and duration.
     const isAvailable = await reservationService.checkAvailability(
-      restaurantId as string,
+      branchId as string,
       Number(partySize),
       date as string,
       startTime as string,
-      Number(duration)
+      Number(duration),
     );
 
+    //if not available, return a 400 response with a message indicating the time slot is not available
     if (!isAvailable) {
       res.status(400).json({
         success: false,
@@ -99,17 +76,22 @@ export const reservationController = {
       return;
     }
 
+    //create the reservation using the reservation service and return a 201 response with the created reservation data
     const reservation = await reservationService.createReservation(
-      restaurantId,
+      branchId,
       customerName,
       phone,
       partySize,
       date,
       startTime,
       duration,
-      email
+      email,
+      preOrderItems,
+      (req as any).user?.id,
     );
 
+    //send a confirmation notification to the customer
+    // (this can be implemented in the service layer)
     res.status(201).json({
       success: true,
       message: "Reservation created successfully",
@@ -127,23 +109,39 @@ export const reservationController = {
    * @returns JSON response with success status and updated reservation data
    */
   modifyReservation: asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
-    const { date, startTime, partySize, duration } = req.body;
+    const validatedParams = validateControllerInput<{ id: string }>(
+      requestSchemas.idParam,
+      req.params,
+      res,
+    );
+    const validatedBody = validateControllerInput<{
+      date?: string;
+      startTime?: string;
+      partySize?: number;
+      duration?: number;
+      preOrderItems?: {
+        itemId: string;
+        name: string;
+        quantity: number;
+        price: number;
+        notes?: string;
+      }[];
+    }>(requestSchemas.modifyReservation, req.body, res);
 
-    if (!date && !startTime && !partySize && !duration) {
-      res.status(400).json({
-        success: false,
-        message: "At least one field must be provided to update",
-        updatable: ["date", "startTime", "partySize", "duration"],
-      });
+    if (!validatedParams || !validatedBody) {
       return;
     }
+
+    const { id } = validatedParams;
+    const { date, startTime, partySize, duration, preOrderItems } =
+      validatedBody;
 
     const updates: any = {};
     if (date) updates.date = date;
     if (startTime) updates.startTime = startTime;
     if (partySize) updates.partySize = partySize;
     if (duration) updates.duration = duration;
+    if (preOrderItems) updates.preOrderItems = preOrderItems;
 
     const reservation = await reservationService.modifyReservation(id, updates);
 
@@ -164,7 +162,17 @@ export const reservationController = {
    * @returns JSON response with success status and cancelled reservation data
    */
   cancelReservation: asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const validatedParams = validateControllerInput<{ id: string }>(
+      requestSchemas.idParam,
+      req.params,
+      res,
+    );
+
+    if (!validatedParams) {
+      return;
+    }
+
+    const { id } = validatedParams;
 
     const reservation = await reservationService.cancelReservation(id);
 
@@ -184,7 +192,17 @@ export const reservationController = {
    * @returns JSON response with success status and confirmed reservation data
    */
   confirmReservation: asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const validatedParams = validateControllerInput<{ id: string }>(
+      requestSchemas.idParam,
+      req.params,
+      res,
+    );
+
+    if (!validatedParams) {
+      return;
+    }
+
+    const { id } = validatedParams;
 
     const reservation = await reservationService.confirmReservation(id);
 
@@ -195,9 +213,26 @@ export const reservationController = {
     });
   }),
 
-  // Complete reservation
+  /**
+   * Marks an existing reservation as completed, clearing any pending kitchen preparation timers.
+   * Typically called by restaurant staff when the guests have finished their visit.
+   *
+   * @param req - Express request object with reservation ID in params
+   * @param res - Express response object
+   * @returns JSON response with success status and the completed reservation data
+   */
   completeReservation: asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const validatedParams = validateControllerInput<{ id: string }>(
+      requestSchemas.idParam,
+      req.params,
+      res,
+    );
+
+    if (!validatedParams) {
+      return;
+    }
+
+    const { id } = validatedParams;
 
     const reservation = await reservationService.completeReservation(id);
 
@@ -217,29 +252,26 @@ export const reservationController = {
    * @returns JSON response with availability status and message
    */
   checkAvailability: asyncHandler(async (req: Request, res: Response) => {
-    const { restaurantId, partySize, date, startTime, duration } = req.query;
+    const validatedQuery = validateControllerInput<{
+      branchId: string;
+      partySize: number;
+      date: string;
+      startTime: string;
+      duration: number;
+    }>(requestSchemas.checkAvailabilityQuery, req.query, res);
 
-    if (!restaurantId || !partySize || !date || !startTime || !duration) {
-      res.status(400).json({
-        success: false,
-        message: "Missing required query parameters",
-        required: [
-          "restaurantId",
-          "partySize",
-          "date",
-          "startTime",
-          "duration",
-        ],
-      });
+    if (!validatedQuery) {
       return;
     }
 
+    const { branchId, partySize, date, startTime, duration } = validatedQuery;
+
     const isAvailable = await reservationService.checkAvailability(
-      restaurantId as string,
-      Number(partySize),
-      date as string,
-      startTime as string,
-      Number(duration)
+      branchId,
+      partySize,
+      date,
+      startTime,
+      duration,
     );
 
     res.status(200).json({
@@ -255,25 +287,25 @@ export const reservationController = {
    * Retrieves all reservations for a specific restaurant on a given date.
    * Returns reservations that are not cancelled, sorted by start time.
    *
-   * @param req - Express request object with query parameters: restaurantId, date
+   * @param req - Express request object with query parameters: branchId, date
    * @param res - Express response object
    * @returns JSON response with count and array of reservations for the date
    */
   getReservationsByDate: asyncHandler(async (req: Request, res: Response) => {
-    const { restaurantId, date } = req.query;
+    const validatedQuery = validateControllerInput<{
+      branchId: string;
+      date: string;
+    }>(requestSchemas.reservationsByDateQuery, req.query, res);
 
-    if (!restaurantId || !date) {
-      res.status(400).json({
-        success: false,
-        message: "Missing required query parameters",
-        required: ["restaurantId", "date"],
-      });
+    if (!validatedQuery) {
       return;
     }
 
+    const { branchId, date } = validatedQuery;
+
     const reservations = await reservationService.getReservationsByDate(
-      restaurantId as string,
-      date as string
+      branchId,
+      date,
     );
 
     res.status(200).json({
@@ -287,27 +319,29 @@ export const reservationController = {
    * Retrieves all available time slots for a restaurant on a specific date and party size.
    * Generates time slots based on restaurant operating hours and existing reservations.
    *
-   * @param req - Express request object with query parameters: restaurantId, partySize, date, duration (optional)
+   * @param req - Express request object with query parameters: branchId, partySize, date, duration (optional)
    * @param res - Express response object
    * @returns JSON response with count and array of available time slots
    */
   getAvailableTimeSlots: asyncHandler(async (req: Request, res: Response) => {
-    const { restaurantId, partySize, date, duration } = req.query;
+    const validatedQuery = validateControllerInput<{
+      branchId: string;
+      partySize: number;
+      date: string;
+      duration?: number;
+    }>(requestSchemas.availableSlotsQuery, req.query, res);
 
-    if (!restaurantId || !partySize || !date) {
-      res.status(400).json({
-        success: false,
-        message: "Missing required query parameters",
-        required: ["restaurantId", "partySize", "date"],
-      });
+    if (!validatedQuery) {
       return;
     }
 
+    const { branchId, partySize, date, duration } = validatedQuery;
+
     const timeSlots = await reservationService.getAvailableTimeSlots(
-      restaurantId as string,
-      Number(partySize),
-      date as string,
-      duration ? Number(duration) : undefined
+      branchId,
+      partySize,
+      date,
+      duration,
     );
 
     res.status(200).json({

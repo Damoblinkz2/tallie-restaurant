@@ -1,12 +1,43 @@
+/**
+ * Waitlist controller — HTTP request handlers for waitlist management.
+ *
+ * Handles adding customers to the waitlist, fetching waitlist entries by date,
+ * converting a waitlist entry into a reservation, and removing entries.
+ * Each handler validates inputs before delegating to the waitlist service.
+ */
 import { Request, Response } from "express";
 import { waitlistService } from "../services/waitlistService.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
+import { requestSchemas } from "../validation/schemas.js";
+import { validateControllerInput } from "../utils/controllerValidation.js";
 
 export const waitlistController = {
-  // Add to waitlist
+  /**
+   * Adds a customer to the restaurant waitlist for a requested date and time.
+   * Creates a waitlist entry and sends a confirmation notification to the customer.
+   *
+   * @param req - Express request containing waitlist details in body
+   * @param res - Express response object
+   * @returns JSON response with success status and the created waitlist entry
+   */
   addToWaitlist: asyncHandler(async (req: Request, res: Response) => {
+    const validatedBody = validateControllerInput<{
+      branchId: string;
+      customerName: string;
+      phone: string;
+      partySize: number;
+      date: string;
+      preferredTime: string;
+      duration: number;
+      email?: string;
+    }>(requestSchemas.addToWaitlist, req.body, res);
+
+    if (!validatedBody) {
+      return;
+    }
+
     const {
-      restaurantId,
+      branchId,
       customerName,
       phone,
       partySize,
@@ -14,42 +45,18 @@ export const waitlistController = {
       preferredTime,
       duration,
       email,
-    } = req.body;
-
-    if (
-      !restaurantId ||
-      !customerName ||
-      !phone ||
-      !partySize ||
-      !date ||
-      !preferredTime ||
-      !duration
-    ) {
-      res.status(400).json({
-        success: false,
-        message: "Missing required fields",
-        required: [
-          "restaurantId",
-          "customerName",
-          "phone",
-          "partySize",
-          "date",
-          "preferredTime",
-          "duration",
-        ],
-      });
-      return;
-    }
+    } = validatedBody;
 
     const waitlistEntry = await waitlistService.addToWaitlist(
-      restaurantId,
+      branchId,
       customerName,
       phone,
       partySize,
       date,
       preferredTime,
       duration,
-      email
+      email,
+      (req as any).user?.id,
     );
 
     res.status(201).json({
@@ -64,26 +71,27 @@ export const waitlistController = {
    * Optionally filters by status (active, notified, etc.).
    * Returns waitlist entries sorted by position.
    *
-   * @param req - Express request object with query parameters: restaurantId, date, status (optional)
+   * @param req - Express request object with query parameters: branchId, date, status (optional)
    * @param res - Express response object
    * @returns JSON response with success status, count, and array of waitlist entries
    */
   getWaitlistByDate: asyncHandler(async (req: Request, res: Response) => {
-    const { restaurantId, date, status } = req.query;
+    const validatedQuery = validateControllerInput<{
+      branchId: string;
+      date: string;
+      status?: "waiting" | "notified" | "converted" | "expired";
+    }>(requestSchemas.waitlistByDateQuery, req.query, res);
 
-    if (!restaurantId || !date) {
-      res.status(400).json({
-        success: false,
-        message: "Missing required query parameters",
-        required: ["restaurantId", "date"],
-      });
+    if (!validatedQuery) {
       return;
     }
 
+    const { branchId, date, status } = validatedQuery;
+
     const waitlist = await waitlistService.getWaitlistByDate(
-      restaurantId as string,
-      date as string,
-      status as string
+      branchId,
+      date,
+      status,
     );
 
     res.status(200).json({
@@ -93,9 +101,27 @@ export const waitlistController = {
     });
   }),
 
-  // Convert waitlist to reservation
+  /**
+   * Converts a waitlist entry into a full reservation.
+   * Only entries with status 'waiting' or 'notified' can be converted.
+   * Verifies that the requested time slot is still available before creating the reservation.
+   *
+   * @param req - Express request with waitlist entry ID in params
+   * @param res - Express response object
+   * @returns JSON response with success status and the newly created reservation
+   */
   convertToReservation: asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const validatedParams = validateControllerInput<{ id: string }>(
+      requestSchemas.idParam,
+      req.params,
+      res,
+    );
+
+    if (!validatedParams) {
+      return;
+    }
+
+    const { id } = validatedParams;
 
     const result = await waitlistService.convertToReservation(id);
 
@@ -116,7 +142,17 @@ export const waitlistController = {
    * @returns JSON response with success status and removed waitlist entry data
    */
   removeFromWaitlist: asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const validatedParams = validateControllerInput<{ id: string }>(
+      requestSchemas.idParam,
+      req.params,
+      res,
+    );
+
+    if (!validatedParams) {
+      return;
+    }
+
+    const { id } = validatedParams;
 
     const waitlistEntry = await waitlistService.removeFromWaitlist(id);
 

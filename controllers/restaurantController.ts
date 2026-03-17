@@ -1,6 +1,15 @@
+/**
+ * Restaurant controller — HTTP request handlers for restaurant management.
+ *
+ * Each handler validates its inputs (at the controller level as a second
+ * guard after route middleware), delegates to the restaurant service, and
+ * returns a structured JSON response.
+ */
 import { Request, Response } from "express";
 import { restaurantService } from "../services/restaurantService.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
+import { requestSchemas } from "../validation/schemas.js";
+import { validateControllerInput } from "../utils/controllerValidation.js";
 
 export const restaurantController = {
   /**
@@ -12,24 +21,18 @@ export const restaurantController = {
    * @returns JSON response with success status and created restaurant data
    */
   createRestaurant: asyncHandler(async (req: Request, res: Response) => {
-    const { name, openingTime, closingTime, totalTables } = req.body;
+    const validatedBody = validateControllerInput<{
+      name: string;
+    }>(requestSchemas.createRestaurant, req.body, res);
 
-    // Validation
-    if (!name || !openingTime || !closingTime || !totalTables) {
-      res.status(400).json({
-        success: false,
-        message: "Missing required fields",
-        required: ["name", "openingTime", "closingTime", "totalTables"],
-      });
+    if (!validatedBody) {
       return;
     }
 
-    const restaurant = await restaurantService.createRestaurant(
-      name,
-      openingTime,
-      closingTime,
-      totalTables
-    );
+    const { name } = validatedBody;
+    const ownerId = (req as any).user?.id;
+
+    const restaurant = await restaurantService.createRestaurant(name, ownerId);
 
     res.status(201).json({
       success: true,
@@ -38,9 +41,19 @@ export const restaurantController = {
     });
   }),
 
-  // Get restaurant details with tables
+  // Get restaurant details with all its registered tables
   getRestaurantDetails: asyncHandler(async (req: Request, res: Response) => {
-    const { id } = req.params;
+    const validatedParams = validateControllerInput<{ id: string }>(
+      requestSchemas.idParam,
+      req.params,
+      res,
+    );
+
+    if (!validatedParams) {
+      return;
+    }
+
+    const { id } = validatedParams;
 
     const details = await restaurantService.getRestaurantDetails(id);
 

@@ -1,6 +1,15 @@
+/**
+ * Waitlist service — business logic for managing customer waitlist entries.
+ *
+ * Customers are added to the waitlist when no table is available for their
+ * preferred date and time.  When a cancellation frees up a slot, the service
+ * checks the waitlist and notifies the first eligible waiting customer.
+ * Customers can also convert their waitlist entry directly into a reservation
+ * once notified, or remove themselves from the waitlist at any time.
+ */
 import { Waitlist } from "../models/waitlist.js";
 import { IWaitlist } from "../types/index.js";
-import { Restaurant } from "../models/restaurant.js";
+import { Branch } from "../models/branch.js";
 import { notificationService } from "./notificationService.js";
 import { reservationService } from "./reservationService.js";
 import mongoose from "mongoose";
@@ -23,22 +32,23 @@ export const waitlistService = {
    * @throws {Error} If restaurant ID is invalid, restaurant not found, or date is in the past
    */
   async addToWaitlist(
-    restaurantId: string,
+    branchId: string,
     customerName: string,
     phone: string,
     partySize: number,
     date: string,
     preferredTime: string,
     duration: number,
-    email?: string
+    email?: string,
+    customerId?: string,
   ): Promise<IWaitlist> {
-    if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
-      throw new Error("Invalid restaurant ID");
+    if (!mongoose.Types.ObjectId.isValid(branchId)) {
+      throw new Error("Invalid branch ID");
     }
 
-    const restaurant = await Restaurant.findById(restaurantId);
-    if (!restaurant) {
-      throw new Error("Restaurant not found");
+    const branch = await Branch.findById(branchId);
+    if (!branch) {
+      throw new Error("Branch not found");
     }
 
     // Validate date is not in the past
@@ -55,7 +65,9 @@ export const waitlistService = {
     expiresAt.setHours(23, 59, 59, 999);
 
     const waitlistEntry = new Waitlist({
-      restaurantId,
+      restaurantId: branch.restaurantId,
+      branchId,
+      customerId,
       customerName,
       phone,
       email,
@@ -86,15 +98,15 @@ export const waitlistService = {
    * @throws {Error} If restaurant ID is invalid
    */
   async getWaitlistByDate(
-    restaurantId: string,
+    branchId: string,
     date: string,
-    status?: string
+    status?: string,
   ): Promise<IWaitlist[]> {
-    if (!mongoose.Types.ObjectId.isValid(restaurantId)) {
-      throw new Error("Invalid restaurant ID");
+    if (!mongoose.Types.ObjectId.isValid(branchId)) {
+      throw new Error("Invalid branch ID");
     }
 
-    const query: any = { restaurantId, date };
+    const query: any = { branchId, date };
 
     if (status) {
       query.status = status;
@@ -116,14 +128,14 @@ export const waitlistService = {
    * @returns {Promise<void>}
    */
   async notifyWaitlist(
-    restaurantId: string,
+    branchId: string,
     date: string,
     startTime: string,
-    duration: number
+    duration: number,
   ): Promise<void> {
     // Find waiting customers for this date
     const waitingCustomers = await Waitlist.find({
-      restaurantId,
+      branchId,
       date,
       status: "waiting",
     }).sort({ createdAt: 1 }); // First come, first served
@@ -131,11 +143,11 @@ export const waitlistService = {
     for (const waitlistEntry of waitingCustomers) {
       // Check if a table is now available for this customer
       const isAvailable = await reservationService.checkAvailability(
-        restaurantId,
+        branchId,
         waitlistEntry.partySize,
         date,
         waitlistEntry.preferredTime,
-        waitlistEntry.duration
+        waitlistEntry.duration,
       );
 
       if (isAvailable) {
@@ -155,6 +167,13 @@ export const waitlistService = {
 
   /**
    * Convert waitlist entry to reservation
+   * Converts a 'waiting' or 'notified' waitlist entry into a confirmed reservation.
+   * Re-checks that the requested time slot is still available before creating the reservation.
+   * Updates the waitlist entry status to 'converted' upon success.
+   *
+   * @param {string} waitlistId - The ID of the waitlist entry to convert
+   * @returns {Promise<{reservation: IReservation, message: string}>} The newly created reservation and a success message
+   * @throws {Error} If waitlist ID is invalid, entry not found, entry status is not convertible, or the time slot is no longer available
    */
   async convertToReservation(waitlistId: string): Promise<any> {
     if (!mongoose.Types.ObjectId.isValid(waitlistId)) {
@@ -175,11 +194,11 @@ export const waitlistService = {
 
     // Check if still available
     const isAvailable = await reservationService.checkAvailability(
-      waitlistEntry.restaurantId.toString(),
+      waitlistEntry.branchId.toString(),
       waitlistEntry.partySize,
       waitlistEntry.date,
       waitlistEntry.preferredTime,
-      waitlistEntry.duration
+      waitlistEntry.duration,
     );
 
     if (!isAvailable) {
@@ -188,14 +207,16 @@ export const waitlistService = {
 
     // Create reservation
     const reservation = await reservationService.createReservation(
-      waitlistEntry.restaurantId.toString(),
+      waitlistEntry.branchId.toString(),
       waitlistEntry.customerName,
       waitlistEntry.phone,
       waitlistEntry.partySize,
       waitlistEntry.date,
       waitlistEntry.preferredTime,
       waitlistEntry.duration,
-      waitlistEntry.email
+      waitlistEntry.email,
+      undefined,
+      waitlistEntry.customerId?.toString(),
     );
 
     // Update waitlist status
@@ -229,7 +250,7 @@ export const waitlistService = {
 
     if (waitlistEntry.status === "converted") {
       throw new Error(
-        "Waitlist entry has already been converted to a reservation"
+        "Waitlist entry has already been converted to a reservation",
       );
     }
 
@@ -254,7 +275,7 @@ export const waitlistService = {
       },
       {
         $set: { status: "expired" },
-      }
+      },
     );
 
     return result.modifiedCount;
